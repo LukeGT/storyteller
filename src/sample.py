@@ -36,12 +36,15 @@ def top_p_logits(logits, p):
         )
 
 
-def sample_sequence(*, hparams, length, start_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0):
+def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0):
     if start_token is None:
         assert context is not None, 'Specify exactly one of start_token and context!'
     else:
         assert context is None, 'Specify exactly one of start_token and context!'
         context = tf.fill([batch_size, 1], start_token)
+
+    if target_token is None:
+        target_token = tf.constant(-1)
 
     def step(hparams, tokens, past=None):
         lm_output = model.model(hparams=hparams, X=tokens, past=past, reuse=tf.AUTO_REUSE)
@@ -67,6 +70,15 @@ def sample_sequence(*, hparams, length, start_token=None, batch_size=None, conte
                 logits = top_p_logits(logits, p=top_p)
             else:
                 logits = top_k_logits(logits, k=top_k)
+            logits = tf.cond(
+                tf.math.greater_equal(target_token, 0),
+                lambda: tf.where(
+                    tf.logical_and(logits > -1e10, tf.compat.v1.sparse_to_dense([[0, target_token]], [1, hparams.n_vocab], [True], False)),
+                    logits * 1.5,
+                    logits,
+                ),
+                lambda: logits
+            )
             samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
             return [
                 tf.concat([past, next_outputs['presents']], axis=-2),
@@ -74,8 +86,10 @@ def sample_sequence(*, hparams, length, start_token=None, batch_size=None, conte
                 tf.concat([output, samples], axis=1),
             ]
 
-        def cond(*args):
-            return True
+        def cond(past, prev, output):
+            prev_shaped = tf.reshape(prev, shape=[batch_size, 1])
+            end_tokens_shaped = tf.reshape(end_tokens, shape=[1, len(end_tokens)])
+            return tf.math.logical_not(tf.math.reduce_any(tf.math.equal(prev_shaped, end_tokens_shaped)))
 
         _, _, tokens = tf.while_loop(
             cond=cond, body=body,
