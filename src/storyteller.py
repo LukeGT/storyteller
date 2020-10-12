@@ -133,7 +133,6 @@ def storyteller(
                     break
 
             print('You win!')
-            print(story)
 
 if __name__ == '__main__':
     fire.Fire(storyteller)
