@@ -36,7 +36,7 @@ def top_p_logits(logits, p):
         )
 
 
-def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0):
+def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0, target_bias=1.5):
     if start_token is None:
         assert context is not None, 'Specify exactly one of start_token and context!'
     else:
@@ -66,19 +66,24 @@ def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_
         def body(past, prev, output):
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
             logits = next_outputs['logits'][:, -1, :]  / tf.to_float(temperature)
-            if top_p > 0.0:
-                logits = top_p_logits(logits, p=top_p)
-            else:
-                logits = top_k_logits(logits, k=top_k)
+
+            # If specified, increse the probability of the target word by target_bias
             logits = tf.cond(
                 tf.math.greater_equal(target_token, 0),
                 lambda: tf.where(
-                    tf.logical_and(logits > -1e10, tf.compat.v1.sparse_to_dense([[0, target_token]], [1, hparams.n_vocab], [True], False)),
-                    logits * 1.5,
+                    tf.compat.v1.sparse_to_dense([[0, target_token]], [1, hparams.n_vocab], [True], False),
+                    logits * target_bias,
                     logits,
                 ),
                 lambda: logits
             )
+
+            # Restrict the logits to either the top_p or top_k tokens
+            if top_p > 0.0:
+                logits = top_p_logits(logits, p=top_p)
+            else:
+                logits = top_k_logits(logits, k=top_k)
+
             samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
             return [
                 tf.concat([past, next_outputs['presents']], axis=-2),
