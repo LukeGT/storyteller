@@ -57,6 +57,7 @@ def storyteller(
 
         context = tf.placeholder(tf.int32, [1, None])
         target_token = tf.placeholder(tf.int32, [])
+        eval_tokens = tf.placeholder(tf.int32, [None])
         np.random.seed(seed)
         tf.set_random_seed(seed)
 
@@ -67,6 +68,13 @@ def storyteller(
             target_token=target_token,
             batch_size=1,
             temperature=temperature, top_k=top_k, top_p=top_p
+        )
+        evaluation = sample.sample_sequence(
+            hparams=hparams, length=100,
+            context=context,
+            eval_tokens=eval_tokens,
+            batch_size=1,
+            temperature=temperature, top_k=0,
         )
 
         saver = tf.train.Saver()
@@ -114,6 +122,18 @@ def storyteller(
                 # Ensure that the sentence doesn't immediately terminate
                 if not user_sentence.endswith(' '):
                     user_sentence += ' '
+
+                context_tokens = enc.encode(story)
+                evaluation_tokens = enc.encode(' ' + user_sentence)
+
+                eval_result = sess.run(evaluation, feed_dict={
+                    context: [context_tokens],
+                    eval_tokens: evaluation_tokens,
+                })[0]
+                for token, result in zip(evaluation_tokens, eval_result):
+                    print(enc.decode([token]), result)
+                print('Average:', sum(eval_result)/len(eval_result))
+                print('Min:', min(eval_result))
 
                 story += ' ' + user_sentence
 

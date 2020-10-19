@@ -1,3 +1,5 @@
+import sys
+
 import tensorflow as tf
 
 import model
@@ -36,7 +38,21 @@ def top_p_logits(logits, p):
         )
 
 
-def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0, target_bias=1.5):
+def sample_sequence(
+    *,
+    hparams,
+    length,
+    start_token=None,
+    target_token=None,
+    end_tokens=[],
+    eval_tokens=None,
+    batch_size=None,
+    context=None,
+    temperature=1,
+    top_k=0,
+    top_p=0.0,
+    target_bias=1.5,
+):
     if start_token is None:
         assert context is not None, 'Specify exactly one of start_token and context!'
     else:
@@ -63,7 +79,7 @@ def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_
         # rather than leaving the last token transformer calculation to the while loop.
         context_output = step(hparams, context[:, :-1])
 
-        def body(past, prev, output):
+        def body(past, prev, output, evaluate, evaluation):
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
             logits = next_outputs['logits'][:, -1, :]  / tf.to_float(temperature)
 
@@ -84,32 +100,50 @@ def sample_sequence(*, hparams, length, start_token=None, end_tokens=[], target_
             else:
                 logits = top_k_logits(logits, k=top_k)
 
-            samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
+            if eval_tokens is None:
+                next_word = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
+                next_evaluation = [[]]
+            else:
+                next_word = [[evaluate[0]]]
+                # I feel like this is wrong, and will likely break when a batch_size > 1 is used
+                next_evaluation = [tf.gather(logits, evaluate[0], axis=1)]
+
             return [
                 tf.concat([past, next_outputs['presents']], axis=-2),
-                tf.squeeze(samples, axis=[1]),
-                tf.concat([output, samples], axis=1),
+                tf.squeeze(next_word, axis=[1]),
+                tf.concat([output, next_word], axis=1),
+                evaluate[1:],
+                tf.concat([evaluation, next_evaluation], axis=1),
             ]
 
-        def cond(past, prev, output):
+        def cond(past, prev, output, evaluate, evaluation):
             prev_shaped = tf.reshape(prev, shape=[batch_size, 1])
-            end_tokens_shaped = tf.reshape(end_tokens, shape=[1, len(end_tokens)])
-            return tf.math.logical_not(tf.math.reduce_any(tf.math.equal(prev_shaped, end_tokens_shaped)))
+            end_tokens_shaped = tf.constant(end_tokens, dtype=tf.int32, shape=[1, len(end_tokens)])
+            end_token_not_seen = tf.math.logical_not(tf.math.reduce_any(tf.math.equal(prev_shaped, end_tokens_shaped)))
+            not_end_of_evaluation = True if eval_tokens is None else tf.greater(tf.shape(evaluate)[0], 0)
+            return tf.logical_and(not_end_of_evaluation, end_token_not_seen)
 
-        _, _, tokens = tf.while_loop(
+        _, _, output, _, evaluation = tf.while_loop(
             cond=cond, body=body,
             maximum_iterations=length,
             loop_vars=[
                 context_output['presents'],
                 context[:, -1],
                 context,
+                tf.constant([]) if eval_tokens is None else eval_tokens,
+                tf.constant([], shape=[batch_size, 0]),
             ],
             shape_invariants=[
                 tf.TensorShape(model.past_shape(hparams=hparams, batch_size=batch_size)),
                 tf.TensorShape([batch_size]),
                 tf.TensorShape([batch_size, None]),
+                tf.TensorShape([None]),
+                tf.TensorShape([batch_size, None]),
             ],
             back_prop=False,
         )
 
-        return tokens
+        if eval_tokens is not None:
+            return evaluation
+        else:
+            return output
