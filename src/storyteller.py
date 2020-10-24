@@ -15,6 +15,7 @@ def storyteller(
     temperature=1,
     top_k=40,
     top_p=0.0,
+    eval_user=False,
 ):
     """
     Interactively run the model
@@ -31,6 +32,8 @@ def storyteller(
      special setting meaning no restrictions. 40 generally is a good value.
     :top_p=0.0 : Float value controlling diversity. Implements nucleus sampling,
      overriding top_k if set to a value > 0. A good setting is 0.9.
+    :eval_user=False : Whether to evaluate the quality of the user's input with
+     respect to the model's predictions.
     """
     enc = encoder.get_encoder(model_name)
     hparams = model.default_hparams()
@@ -124,16 +127,18 @@ def storyteller(
                     user_sentence += ' '
 
                 context_tokens = enc.encode(story)
-                evaluation_tokens = enc.encode(' ' + user_sentence)
 
-                eval_result = sess.run(evaluation, feed_dict={
-                    context: [context_tokens],
-                    eval_tokens: evaluation_tokens,
-                })[0]
-                for token, result in zip(evaluation_tokens, eval_result):
-                    print(enc.decode([token]), result)
-                print('Average:', sum(eval_result)/len(eval_result))
-                print('Min:', min(eval_result))
+                if eval_user:
+                    evaluation_tokens = enc.encode(' ' + user_sentence)
+
+                    eval_result = sess.run(evaluation, feed_dict={
+                        context: [context_tokens],
+                        eval_tokens: evaluation_tokens,
+                    })[0]
+                    for token, result in zip(evaluation_tokens, eval_result):
+                        print(enc.decode([token]), result)
+                    print('Average:', sum(eval_result)/len(eval_result))
+                    print('Min:', min(eval_result))
 
                 story += ' ' + user_sentence
 
