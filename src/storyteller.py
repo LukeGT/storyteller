@@ -16,6 +16,7 @@ def storyteller(
     top_k=40,
     top_p=0.0,
     eval_user=False,
+    gpu_layers=20,
 ):
     """
     Interactively run the model
@@ -70,7 +71,8 @@ def storyteller(
             end_tokens=end_tokens,
             target_token=target_token,
             batch_size=1,
-            temperature=temperature, top_k=top_k, top_p=top_p
+            temperature=temperature, top_k=top_k, top_p=top_p,
+            gpu_layers=gpu_layers,
         )
         evaluation = sample.sample_sequence(
             hparams=hparams, length=100,
@@ -78,6 +80,7 @@ def storyteller(
             eval_tokens=eval_tokens,
             batch_size=1,
             temperature=temperature, top_k=0,
+            gpu_layers=gpu_layers,
         )
 
         saver = tf.train.Saver()

@@ -52,6 +52,7 @@ def sample_sequence(
     top_k=0,
     top_p=0.0,
     target_bias=1.5,
+    gpu_layers=20,
 ):
     if start_token is None:
         assert context is not None, 'Specify exactly one of start_token and context!'
@@ -63,7 +64,7 @@ def sample_sequence(
         target_token = tf.constant(-1)
 
     def step(hparams, tokens, past=None):
-        lm_output = model.model(hparams=hparams, X=tokens, past=past, reuse=tf.AUTO_REUSE)
+        lm_output = model.model(hparams=hparams, X=tokens, past=past, reuse=tf.AUTO_REUSE, gpu_layers=gpu_layers)
 
         logits = lm_output['logits'][:, :, :hparams.n_vocab]
         presents = lm_output['present']
