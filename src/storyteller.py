@@ -4,11 +4,15 @@ import fire
 import json
 import os
 import re
+import math
 import numpy as np
 import nvidia_smi
 import tensorflow as tf
 
 import model, sample, encoder
+
+BASE_MEM_USAGE = 726_835_200
+LAYER_MEM_USAGE = 175_000_000
 
 def storyteller(
     model_name='1558M',
@@ -17,7 +21,7 @@ def storyteller(
     top_k=40,
     top_p=0.0,
     eval_user=False,
-    gpu_layers=20,
+    gpu_layers=None,
 ):
     """
     Interactively run the model
@@ -37,6 +41,11 @@ def storyteller(
     :eval_user=False : Whether to evaluate the quality of the user's input with
      respect to the model's predictions.
     """
+    gpu_mem_before = get_gpu_memory()
+    if gpu_layers is None:
+        gpu_layers = math.floor((gpu_mem_before.free-BASE_MEM_USAGE)/LAYER_MEM_USAGE)
+        print(f"Using {gpu_layers} GPU layers")
+
     enc = encoder.get_encoder(model_name)
     hparams = model.default_hparams()
     with open(os.path.join('models', model_name, 'hparams.json')) as f:
@@ -44,7 +53,7 @@ def storyteller(
 
     # Hacky end-of-sentence detection
     adjacent_punctuation = list('()"\'')
-    ending_punctuation = list('.!?')
+    ending_punctuation = list('.!?…')
     end_strings = ending_punctuation + [
         adjacent + ending
         for adjacent in adjacent_punctuation
@@ -89,7 +98,8 @@ def storyteller(
         ckpt = tf.train.latest_checkpoint(os.path.join('models', model_name))
         saver.restore(sess, ckpt)
 
-        report_gpu_memory()
+        gpu_mem_after = get_gpu_memory()
+        print('GPU memory used:', gpu_mem_after.used - gpu_mem_before.used)
 
         while True:
             target_word = input("Select a target word >>> ")
@@ -98,10 +108,10 @@ def storyteller(
                 print('Target word not in vocab')
                 continue
             target = target_encoded[0]
-            story = ''
+            story = 'A short story\nBy John Smith\n\nIt began like this. '
 
             while not any(story.endswith(end_string) for end_string in end_strings):
-                context_tokens = enc.encode('A short story\nBy John Smith\n\nIt began like this. ' + story)
+                context_tokens = enc.encode(story)
                 out = sess.run(output, feed_dict={
                     context: [context_tokens],
                     target_token: -1,
@@ -167,17 +177,12 @@ def storyteller(
             print('You win!')
 
 
-def report_gpu_memory():
+def get_gpu_memory():
     nvidia_smi.nvmlInit()
-
     handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
     info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-
-    print("Total memory:", info.total)
-    print("Free memory:", info.free)
-    print("Used memory:", info.used)
-
     nvidia_smi.nvmlShutdown()
+    return info
 
 
 if __name__ == '__main__':
