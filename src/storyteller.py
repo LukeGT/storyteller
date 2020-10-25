@@ -57,6 +57,7 @@ def storyteller(
     end_tokens = [ enc.encode(end_string)[0] for end_string in end_strings ]
 
     config = tf.ConfigProto()
+    config.gpu_options.allow_growth=True
 
     with tf.Session(graph=tf.Graph(), config=config) as sess:
 
