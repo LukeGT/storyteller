@@ -5,6 +5,7 @@ import json
 import os
 import re
 import numpy as np
+import nvidia_smi
 import tensorflow as tf
 
 import model, sample, encoder
@@ -87,6 +88,8 @@ def storyteller(
         ckpt = tf.train.latest_checkpoint(os.path.join('models', model_name))
         saver.restore(sess, ckpt)
 
+        report_gpu_memory()
+
         while True:
             target_word = input("Select a target word >>> ")
             target_encoded = enc.encode(' ' + target_word.lstrip())
@@ -161,6 +164,20 @@ def storyteller(
                     break
 
             print('You win!')
+
+
+def report_gpu_memory():
+    nvidia_smi.nvmlInit()
+
+    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
+    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+
+    print("Total memory:", info.total)
+    print("Free memory:", info.free)
+    print("Used memory:", info.used)
+
+    nvidia_smi.nvmlShutdown()
+
 
 if __name__ == '__main__':
     fire.Fire(storyteller)
