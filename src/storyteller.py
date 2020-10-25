@@ -9,10 +9,10 @@ import numpy as np
 import nvidia_smi
 import tensorflow as tf
 
-import model, sample, encoder
+import model
+import sample
+import encoder
 
-BASE_MEM_USAGE = 726_835_200
-LAYER_MEM_USAGE = 175_000_000
 
 def storyteller(
     model_name='1558M',
@@ -40,64 +40,22 @@ def storyteller(
      overriding top_k if set to a value > 0. A good setting is 0.9.
     :eval_user=False : Whether to evaluate the quality of the user's input with
      respect to the model's predictions.
+    :gpu_layers=None : The amount of transformer layers to assign to the GPU.
+     By default a number is chosen based on available GPU memory and heuristics.
     """
     gpu_mem_before = get_gpu_memory()
     if gpu_layers is None:
-        gpu_layers = math.floor((gpu_mem_before.free-BASE_MEM_USAGE)/LAYER_MEM_USAGE)
-        print(f"Using {gpu_layers} GPU layers")
+        gpu_layers = estimate_gpu_layers(gpu_mem_before)
 
-    enc = encoder.get_encoder(model_name)
-    hparams = model.default_hparams()
-    with open(os.path.join('models', model_name, 'hparams.json')) as f:
-        hparams.override_from_dict(json.load(f))
-
-    # Hacky end-of-sentence detection
-    adjacent_punctuation = list('()"\'')
-    ending_punctuation = list('.!?…')
-    end_strings = ending_punctuation + [
-        adjacent + ending
-        for adjacent in adjacent_punctuation
-        for ending in ending_punctuation
-    ] + [
-        ending + adjacent
-        for adjacent in adjacent_punctuation
-        for ending in ending_punctuation
-    ]
-    end_tokens = [ enc.encode(end_string)[0] for end_string in end_strings ]
-
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    config.gpu_options.force_gpu_compatible = True
-
-    with tf.Session(graph=tf.Graph(), config=config) as sess:
-
-        context = tf.placeholder(tf.int32, [1, None])
-        target_token = tf.placeholder(tf.int32, [])
-        eval_tokens = tf.placeholder(tf.int32, [None])
-        np.random.seed(seed)
-        tf.set_random_seed(seed)
-
-        output = sample.sample_sequence(
-            hparams=hparams, length=100,
-            context=context,
-            end_tokens=end_tokens,
-            target_token=target_token,
-            batch_size=1,
-            temperature=temperature, top_k=top_k, top_p=top_p,
-            gpu_layers=gpu_layers,
-        )
-        evaluation = sample.sample_sequence(
-            hparams=hparams, length=100,
-            context=context,
-            eval_tokens=eval_tokens,
-            batch_size=1,
-            temperature=temperature, top_k=0,
-            gpu_layers=gpu_layers,
-        )
-
-        saver = tf.train.Saver()
-        ckpt = tf.train.latest_checkpoint(os.path.join('models', model_name))
-        saver.restore(sess, ckpt)
+    with StoryServer(
+        model_name=model_name,
+        seed=seed,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        eval_user=eval_user,
+        gpu_layers=gpu_layers,
+    ) as story_server:
 
         gpu_mem_after = get_gpu_memory()
         print('Total GPU memory:', gpu_mem_after.total)
@@ -107,24 +65,17 @@ def storyteller(
 
         while True:
             target_word = input("Select a target word >>> ")
-            target_encoded = enc.encode(' ' + target_word.lstrip())
-            if len(target_encoded) != 1:
+            try:
+                target = story_server.encode_word(target_word)
+            except ValueError:
                 print('Target word not in vocab')
                 continue
-            target = target_encoded[0]
+
             story = 'A short story\nBy John Smith\n\nIt began like this. '
 
-            while not any(story.endswith(end_string) for end_string in end_strings):
-                context_tokens = enc.encode(story)
-                out = sess.run(output, feed_dict={
-                    context: [context_tokens],
-                    target_token: -1,
-                })[:, len(context_tokens):]
-
-                text = enc.decode(out[0])
-                print(text, end='')
-                story += text
-            print()
+            text = story_server.expand_story(story)
+            story += text
+            print(text)
 
             while True:
                 while True:
@@ -141,44 +92,158 @@ def storyteller(
                     break
 
                 # Add a full stop if it wasn't included
-                if not any(user_sentence.rstrip().endswith(end_string) for end_string in end_strings):
+                if not any(user_sentence.rstrip().endswith(end_string) for end_string in story_server.end_strings):
                     user_sentence = user_sentence.rstrip() + '. '
                 # Ensure that the sentence doesn't immediately terminate
                 if not user_sentence.endswith(' '):
                     user_sentence += ' '
 
-                context_tokens = enc.encode(story)
-
                 if eval_user:
-                    evaluation_tokens = enc.encode(' ' + user_sentence)
-
-                    eval_result = sess.run(evaluation, feed_dict={
-                        context: [context_tokens],
-                        eval_tokens: evaluation_tokens,
-                    })[0]
-                    for token, result in zip(evaluation_tokens, eval_result):
-                        print(enc.decode([token]), result)
-                    print('Average:', sum(eval_result)/len(eval_result))
-                    print('Min:', min(eval_result))
+                    results = story_server.evaluate_user(story, user_sentence)
+                    scores = [result[1] for result in results]
+                    print(results)
+                    print('Average:', sum(scores)/len(scores))
+                    print('Min:', min(scores))
 
                 story += ' ' + user_sentence
-
-                while not any(story.endswith(end_string) for end_string in end_strings):
-                    context_tokens = enc.encode(story)
-                    out = sess.run(output, feed_dict={
-                        context: [context_tokens],
-                        target_token: target,
-                    })[:, len(context_tokens):]
-
-                    text = enc.decode(out[0])
-                    print(text, end='')
-                    story += text
-                print()
+                text = story_server.expand_story(story, target)
+                story += text
+                print(text)
 
                 if re.search(r'\b' + target_word, text):
                     break
 
             print('You win!')
+
+
+class StoryServer:
+
+    def __init__(self,
+        model_name='1558M',
+        seed=None,
+        temperature=1,
+        top_k=40,
+        top_p=0.0,
+        eval_user=False,
+        gpu_layers=None,
+    ):
+        self.model_name = model_name
+        self.seed = seed
+        self.temperature = temperature
+        self.top_k = top_k
+        self.top_p = top_p
+        self.gpu_layers = gpu_layers
+
+        self.enc = encoder.get_encoder(model_name)
+        self.hparams = self._get_hparams()
+        self.end_strings = self._get_end_strings()
+        self.end_tokens = [ self.enc.encode(end_string)[0] for end_string in self.end_strings ]
+
+        self.sess = tf.Session(graph=tf.Graph(), config=self._get_config())
+
+    def _get_hparams(self):
+        hparams = model.default_hparams()
+        with open(os.path.join('models', self.model_name, 'hparams.json')) as f:
+            hparams.override_from_dict(json.load(f))
+        return hparams
+
+    def _get_config(self):
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        config.gpu_options.force_gpu_compatible = True
+        return config
+
+    def _get_end_strings(self):
+        # Hacky end-of-sentence detection
+        adjacent_punctuation = list('()"\'')
+        ending_punctuation = list('.!?…')
+        end_strings = ending_punctuation + [
+            adjacent + ending
+            for adjacent in adjacent_punctuation
+            for ending in ending_punctuation
+        ] + [
+            ending + adjacent
+            for adjacent in adjacent_punctuation
+            for ending in ending_punctuation
+        ]
+        return end_strings
+
+    def __enter__(self):
+        self.sess.__enter__()
+
+        self.context = tf.placeholder(tf.int32, [1, None])
+        self.target_token = tf.placeholder(tf.int32, [])
+        self.eval_tokens = tf.placeholder(tf.int32, [None])
+        np.random.seed(self.seed)
+        tf.set_random_seed(self.seed)
+
+        self.output = sample.sample_sequence(
+            hparams=self.hparams, length=100,
+            context=self.context,
+            end_tokens=self.end_tokens,
+            target_token=self.target_token,
+            batch_size=1,
+            temperature=self.temperature, top_k=self.top_k, top_p=self.top_p,
+            gpu_layers=self.gpu_layers,
+        )
+        self.evaluation = sample.sample_sequence(
+            hparams=self.hparams, length=100,
+            context=self.context,
+            eval_tokens=self.eval_tokens,
+            batch_size=1,
+            temperature=self.temperature, top_k=0,
+            gpu_layers=self.gpu_layers,
+        )
+
+        saver = tf.train.Saver()
+        ckpt = tf.train.latest_checkpoint(os.path.join('models', self.model_name))
+        saver.restore(self.sess, ckpt)
+
+        return self
+
+    def __exit__(self, *args):
+        self.sess.__exit__(*args)
+        return self
+
+    def encode_word(self, word):
+        encoded = self.enc.encode(' ' + word.lstrip())
+        if len(encoded) != 1:
+            raise ValueError('Target word not in vocab')
+        return encoded[0]
+
+    def expand_story(self, story, target=None):
+        run_options = tf.compat.v1.RunOptions(timeout_in_ms=30_000)
+
+        expansion = ''
+        target_token = -1 if target is None else target
+
+        while not any(expansion.endswith(end_string) for end_string in self.end_strings):
+            context_tokens = self.enc.encode(story + expansion)
+            out = self.sess.run(self.output, options=run_options, feed_dict={
+                self.context: [context_tokens],
+                self.target_token: target_token,
+            })[:, len(context_tokens):]
+
+            text = self.enc.decode(out[0])
+            expansion += text
+
+        return expansion
+
+    def evaluate_user(self, story, user_sentence):
+        run_options = tf.compat.v1.RunOptions(timeout_in_ms=30_000)
+
+        context_tokens = self.enc.encode(story)
+        evaluation_tokens = self.enc.encode(' ' + user_sentence)
+
+        eval_result = self.sess.run(self.evaluation, options=run_options, feed_dict={
+            self.context: [context_tokens],
+            self.eval_tokens: evaluation_tokens,
+        })[0]
+
+        return list(
+            (self.enc.decode([token]), result)
+            for token, result in zip(evaluation_tokens, eval_result)
+        )
 
 
 def get_gpu_memory():
@@ -187,6 +252,16 @@ def get_gpu_memory():
     info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
     nvidia_smi.nvmlShutdown()
     return info
+
+
+BASE_MEM_USAGE = 726_835_200
+LAYER_MEM_USAGE = 200_000_000
+
+
+def estimate_gpu_layers(gpu_memory):
+    gpu_layers = math.floor((gpu_memory.free-BASE_MEM_USAGE)/LAYER_MEM_USAGE)
+    print(f"Using {gpu_layers} GPU layers")
+    return gpu_layers
 
 
 if __name__ == '__main__':
