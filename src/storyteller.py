@@ -66,7 +66,8 @@ def storyteller(
     end_tokens = [ enc.encode(end_string)[0] for end_string in end_strings ]
 
     config = tf.ConfigProto()
-    config.gpu_options.allow_growth=True
+    config.gpu_options.allow_growth = True
+    config.gpu_options.force_gpu_compatible = True
 
     with tf.Session(graph=tf.Graph(), config=config) as sess:
 
@@ -99,7 +100,10 @@ def storyteller(
         saver.restore(sess, ckpt)
 
         gpu_mem_after = get_gpu_memory()
-        print('GPU memory used:', gpu_mem_after.used - gpu_mem_before.used)
+        print('Total GPU memory:', gpu_mem_after.total)
+        print(f'Free GPU memory: {gpu_mem_after.free} ({gpu_mem_after.free/gpu_mem_after.total*100:.2g}%)')
+        print(f'Used GPU memory: {gpu_mem_after.used} ({gpu_mem_after.used/gpu_mem_after.total*100:.2g}%)')
+        print(f'Used GPU memory by model: {gpu_mem_after.used - gpu_mem_before.used} ({(gpu_mem_after.used - gpu_mem_before.used)/gpu_mem_after.total*100:.2g}%)')
 
         while True:
             target_word = input("Select a target word >>> ")
