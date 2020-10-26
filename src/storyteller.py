@@ -106,7 +106,7 @@ def storyteller(
                     print('Min:', min(scores))
 
                 story += ' ' + user_sentence
-                text = story_server.expand_story(story, target)
+                text = story_server.expand_story(story, [target], 3)
                 story += text
                 print(text)
 
@@ -171,17 +171,20 @@ class StoryServer:
     def __enter__(self):
         self.sess.__enter__()
 
-        self.context = tf.placeholder(tf.int32, [1, None])
-        self.target_token = tf.placeholder(tf.int32, [])
-        self.eval_tokens = tf.placeholder(tf.int32, [None])
         np.random.seed(self.seed)
         tf.set_random_seed(self.seed)
+
+        self.context = tf.placeholder(tf.int32, [1, None])
+        self.target_tokens = tf.placeholder(tf.int64, [None])
+        self.target_bias = tf.placeholder(tf.float32, [None])
+        self.eval_tokens = tf.placeholder(tf.int32, [None])
 
         self.output = sample.sample_sequence(
             hparams=self.hparams, length=100,
             context=self.context,
             end_tokens=self.end_tokens,
-            target_token=self.target_token,
+            target_tokens=self.target_tokens,
+            target_bias=self.target_bias,
             batch_size=1,
             temperature=self.temperature, top_k=self.top_k, top_p=self.top_p,
             gpu_layers=self.gpu_layers,
@@ -211,17 +214,16 @@ class StoryServer:
             raise ValueError('Target word not in vocab')
         return encoded[0]
 
-    def expand_story(self, story, target=None):
+    def expand_story(self, story, target_tokens=[], bias=1.0):
         run_options = tf.compat.v1.RunOptions(timeout_in_ms=30_000)
-
         expansion = ''
-        target_token = -1 if target is None else target
 
         while not any(expansion.endswith(end_string) for end_string in self.end_strings):
             context_tokens = self.enc.encode(story + expansion)
             out = self.sess.run(self.output, options=run_options, feed_dict={
                 self.context: [context_tokens],
-                self.target_token: target_token,
+                self.target_tokens: target_tokens,
+                self.target_bias: [bias] * len(target_tokens),
             })[:, len(context_tokens):]
 
             text = self.enc.decode(out[0])

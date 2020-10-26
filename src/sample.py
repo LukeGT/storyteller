@@ -43,7 +43,8 @@ def sample_sequence(
     hparams,
     length,
     start_token=None,
-    target_token=None,
+    target_tokens=None,
+    target_bias=None,
     end_tokens=[],
     eval_tokens=None,
     batch_size=None,
@@ -51,7 +52,6 @@ def sample_sequence(
     temperature=1,
     top_k=0,
     top_p=0.0,
-    target_bias=1.5,
     gpu_layers=20,
 ):
     if start_token is None:
@@ -60,8 +60,10 @@ def sample_sequence(
         assert context is None, 'Specify exactly one of start_token and context!'
         context = tf.fill([batch_size, 1], start_token)
 
-    if target_token is None:
-        target_token = tf.constant(-1)
+    if target_tokens is None:
+        target_tokens = tf.constant([], dtype=tf.dtypes.int64)
+    if target_bias is None:
+        target_bias = tf.constant([], dtype=tf.dtypes.float32)
 
     def step(hparams, tokens, past=None):
         lm_output = model.model(hparams=hparams, X=tokens, past=past, reuse=tf.AUTO_REUSE, gpu_layers=gpu_layers)
@@ -84,15 +86,17 @@ def sample_sequence(
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
             logits = next_outputs['logits'][:, -1, :]  / tf.to_float(temperature)
 
-            # If specified, increse the probability of the target word by target_bias
-            logits = tf.cond(
-                tf.math.greater_equal(target_token, 0),
-                lambda: tf.where(
-                    tf.compat.v1.sparse_to_dense([[0, target_token]], [1, hparams.n_vocab], [True], False),
-                    logits * target_bias,
-                    logits,
+            # If specified, increase the probability of each target word by its corresponding target_bias
+            logits *= tf.reshape(
+                tf.sparse.to_dense(
+                    tf.SparseTensor(
+                        tf.reshape(target_tokens, [-1, 1]),
+                        target_bias,
+                        [hparams.n_vocab],
+                    ),
+                    default_value=1,
                 ),
-                lambda: logits
+                shape=[1, -1],
             )
 
             # Restrict the logits to either the top_p or top_k tokens
