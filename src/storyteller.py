@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 
-import fire
+from typing import List
+from typing import Set
+from typing import Text
+
+import dataclasses
 import json
-import os
-import re
 import math
+import os
+import random
+import re
+
+import fire
 import numpy as np
 import nvidia_smi
 import tensorflow as tf
@@ -12,7 +19,6 @@ import tensorflow as tf
 import model
 import sample
 import encoder
-
 
 def storyteller(
     model_name='1558M',
@@ -57,6 +63,13 @@ def storyteller(
         gpu_layers=gpu_layers,
     ) as story_server:
 
+        def get_target_token(prompt: Text):
+            while True:
+                try:
+                    return story_server.encode_word(input(prompt))
+                except ValueError:
+                    print('Target word not in vocab')
+
         gpu_mem_after = get_gpu_memory()
         print('Total GPU memory:', gpu_mem_after.total)
         print(f'Free GPU memory: {gpu_mem_after.free} ({gpu_mem_after.free/gpu_mem_after.total*100:.2g}%)')
@@ -64,39 +77,76 @@ def storyteller(
         print(f'Used GPU memory by model: {gpu_mem_after.used - gpu_mem_before.used} ({(gpu_mem_after.used - gpu_mem_before.used)/gpu_mem_after.total*100:.2g}%)')
 
         while True:
-            target_word = input("Select a target word >>> ")
-            try:
-                target = story_server.encode_word(target_word)
-            except ValueError:
-                print('Target word not in vocab')
-                continue
+            # Setup
+            team_num = int(input(f"How many teams? >>> "))
+            teams = [Team() for _ in range(team_num)]
+            team_turn = random.randrange(team_num)
 
+            for t, team in enumerate(teams):
+                name = None
+                while name != '':
+                    if name is not None:
+                        team.players.append(Player(name))
+                    name = input(f"Enter the name of Player {len(team.players)+1} for Team {t+1} >>> ")
+
+            target_word_num = int(input(f"How many target words for each team? >>> "))
+            for t, team in enumerate(teams):
+                for target in range(target_word_num):
+                    target_token = get_target_token(f"Select target word {target+1} for Team {t+1} >>> ")
+                    team.target_tokens.append(target_token)
+
+            # Start the story
             story = 'A short story\nBy John Smith\n\nIt began like this. '
-
             text = story_server.expand_story(story)
             story += text
             print(text)
 
-            while True:
+            def get_contained_target_tokens(sentence: Text, team: Team):
+                tokens = []
+                for target_token in team.unseen_tokens():
+                    target_word = story_server.decode_token(target_token)
+                    if re.search(r'\b' + target_word, sentence):
+                        tokens.append(target_token)
+                return tokens
+
+            def get_user_sentence(team: Team):
+                player = team.current_player()
                 while True:
-                    user_sentence = input(">>> ")
+                    user_sentence = input(f"{player.name} >>> ")
+
                     if not user_sentence:
                         print('Prompt should not be empty!')
                         continue
-                    if re.search(r'\b' + target_word, user_sentence):
-                        print('You can\'t use the target word in your own sentence.')
+
+                    contained_target_tokens = get_contained_target_tokens(user_sentence, team)
+                    if contained_target_tokens:
+                        print(
+                            'Your sentence cannot contain your team\'s target tokens: ',
+                            [story_server.decode_token(target_token) for target_token in contained_target_tokens],
+                        )
                         continue
-                    break
 
-                if user_sentence == 'quit':
-                    break
+                    if user_sentence == 'quit':
+                        return None
 
-                # Add a full stop if it wasn't included
-                if not any(user_sentence.rstrip().endswith(end_string) for end_string in story_server.end_strings):
-                    user_sentence = user_sentence.rstrip() + '. '
-                # Ensure that the sentence doesn't immediately terminate
-                if not user_sentence.endswith(' '):
-                    user_sentence += ' '
+                    # Add a full stop if it wasn't included
+                    if not any(user_sentence.rstrip().endswith(end_string) for end_string in story_server.end_strings):
+                        user_sentence = user_sentence.rstrip() + '. '
+                    # Ensure that the sentence doesn't immediately terminate
+                    if not user_sentence.endswith(' '):
+                        user_sentence += ' '
+
+                    return user_sentence
+
+            winners = []
+            while not winners:
+                team_turn = (team_turn + 1) % len(teams)
+                current_team = teams[team_turn]
+                current_team.next_turn()
+
+                user_sentence = get_user_sentence(current_team)
+                if user_sentence is None:
+                    break
 
                 if eval_user:
                     results = story_server.evaluate_user(story, user_sentence)
@@ -106,14 +156,49 @@ def storyteller(
                     print('Min:', min(scores))
 
                 story += ' ' + user_sentence
-                text = story_server.expand_story(story, [target], 3)
+                text = story_server.expand_story(
+                    story,
+                    sorted(target_token for team in teams for target_token in team.unseen_tokens()),
+                    1.5,
+                )
                 story += text
                 print(text)
 
-                if re.search(r'\b' + target_word, text):
-                    break
+                for t, team in enumerate(teams):
+                    contained_target_tokens = get_contained_target_tokens(text, team)
+                    if contained_target_tokens:
+                        print(f"Team {t+1} scored:", [story_server.decode_token(target_token) for target_token in contained_target_tokens])
+                        team.seen_tokens |= set(contained_target_tokens)
 
-            print('You win!')
+                for t, team in enumerate(teams):
+                    if not team.unseen_tokens():
+                        winners.append(t)
+
+            for winner in winners:
+                print("~~~ The End ~~~")
+                print(f"Team {winner+1} wins!", [player.name for player in teams[winner].players])
+
+
+@dataclasses.dataclass
+class Player:
+    name: Text
+
+
+@dataclasses.dataclass
+class Team:
+    players: List[Player] = dataclasses.field(default_factory=list)
+    target_tokens: List[int] = dataclasses.field(default_factory=list)
+    seen_tokens: Set[int] = dataclasses.field(default_factory=set)
+    turn: int = 0
+
+    def current_player(self):
+        return self.players[self.turn]
+
+    def next_turn(self):
+        self.turn = (self.turn + 1) % len(self.players)
+
+    def unseen_tokens(self):
+        return set(self.target_tokens) - self.seen_tokens
 
 
 class StoryServer:
@@ -205,8 +290,7 @@ class StoryServer:
         return self
 
     def __exit__(self, *args):
-        self.sess.__exit__(*args)
-        return self
+        return self.sess.__exit__(*args)
 
     def encode_word(self, word):
         encoded = self.enc.encode(' ' + word.lstrip())
@@ -214,11 +298,15 @@ class StoryServer:
             raise ValueError('Target word not in vocab')
         return encoded[0]
 
+    def decode_token(self, token):
+        decoded = self.enc.decode([token])
+        return decoded.strip()
+
     def expand_story(self, story, target_tokens=[], bias=1.0):
         run_options = tf.compat.v1.RunOptions(timeout_in_ms=30_000)
         expansion = ''
 
-        while not any(expansion.endswith(end_string) for end_string in self.end_strings):
+        for _ in range(1):  # TODO: Figure out a way of stopping huge run on sentences, then increase this
             context_tokens = self.enc.encode(story + expansion)
             out = self.sess.run(self.output, options=run_options, feed_dict={
                 self.context: [context_tokens],
@@ -228,6 +316,9 @@ class StoryServer:
 
             text = self.enc.decode(out[0])
             expansion += text
+
+            if any(expansion.endswith(end_string) for end_string in self.end_strings):
+                break
 
         return expansion
 
