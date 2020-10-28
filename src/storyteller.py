@@ -174,8 +174,8 @@ def storyteller(
                     if not team.unseen_tokens():
                         winners.append(t)
 
+            print("~~~ The End ~~~")
             for winner in winners:
-                print("~~~ The End ~~~")
                 print(f"Team {winner+1} wins!", [player.name for player in teams[winner].players])
 
 

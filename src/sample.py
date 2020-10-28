@@ -81,23 +81,21 @@ def sample_sequence(
         # TODO: Would be slightly faster if we called step on the entire context,
         # rather than leaving the last token transformer calculation to the while loop.
         context_output = step(hparams, context[:, :-1])
+        initial_target_weights = tf.sparse.to_dense(
+            tf.SparseTensor(
+                tf.reshape(target_tokens, [-1, 1]),
+                target_bias,
+                [hparams.n_vocab],
+            ),
+            default_value=1,
+        )
 
-        def body(past, prev, output, evaluate, evaluation):
+        def body(past, prev, output, target_weights, evaluate, evaluation):
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
             logits = next_outputs['logits'][:, -1, :]  / tf.to_float(temperature)
 
             # If specified, increase the probability of each target word by its corresponding target_bias
-            logits *= tf.reshape(
-                tf.sparse.to_dense(
-                    tf.SparseTensor(
-                        tf.reshape(target_tokens, [-1, 1]),
-                        target_bias,
-                        [hparams.n_vocab],
-                    ),
-                    default_value=1,
-                ),
-                shape=[1, -1],
-            )
+            logits *= tf.reshape(target_weights, [1, -1])
 
             # Restrict the logits to either the top_p or top_k tokens
             if top_p > 0.0:
@@ -113,28 +111,47 @@ def sample_sequence(
                 # I feel like this is wrong, and will likely break when a batch_size > 1 is used
                 next_evaluation = [tf.gather(logits, evaluate[0], axis=1)]
 
+            new_target_weights = tf.where(
+                tf.sparse.to_dense(
+                    tf.sparse.reorder(
+                        tf.SparseTensor(
+                            # This will do the wrong thing for batch sizes > 1
+                            # Instead of removing a target weight only for that batch, it will remove it for all batches.
+                            tf.reshape(tf.cast(next_word, tf.dtypes.int64), [-1, 1]),
+                            [False],
+                            [hparams.n_vocab],
+                        ),
+                    ),
+                    default_value=True,
+                ),
+                target_weights,
+                tf.ones_like(target_weights),
+            )
+
             return [
                 tf.concat([past, next_outputs['presents']], axis=-2),
                 tf.squeeze(next_word, axis=[1]),
                 tf.concat([output, next_word], axis=1),
+                new_target_weights,
                 evaluate[1:],
                 tf.concat([evaluation, next_evaluation], axis=1),
             ]
 
-        def cond(past, prev, output, evaluate, evaluation):
+        def cond(past, prev, output, target_weights, evaluate, evaluation):
             prev_shaped = tf.reshape(prev, shape=[batch_size, 1])
             end_tokens_shaped = tf.constant(end_tokens, dtype=tf.int32, shape=[1, len(end_tokens)])
             end_token_not_seen = tf.math.logical_not(tf.math.reduce_any(tf.math.equal(prev_shaped, end_tokens_shaped)))
             not_end_of_evaluation = True if eval_tokens is None else tf.greater(tf.shape(evaluate)[0], 0)
             return tf.logical_and(not_end_of_evaluation, end_token_not_seen)
 
-        _, _, output, _, evaluation = tf.while_loop(
+        _, _, output, _, _, evaluation = tf.while_loop(
             cond=cond, body=body,
             maximum_iterations=length,
             loop_vars=[
                 context_output['presents'],
                 context[:, -1],
                 context,
+                initial_target_weights,
                 tf.constant([]) if eval_tokens is None else eval_tokens,
                 tf.constant([], shape=[batch_size, 0]),
             ],
@@ -142,6 +159,7 @@ def sample_sequence(
                 tf.TensorShape(model.past_shape(hparams=hparams, batch_size=batch_size)),
                 tf.TensorShape([batch_size]),
                 tf.TensorShape([batch_size, None]),
+                tf.TensorShape([hparams.n_vocab]),
                 tf.TensorShape([None]),
                 tf.TensorShape([batch_size, None]),
             ],
