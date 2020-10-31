@@ -97,7 +97,7 @@ def storyteller(
 
             # Start the story
             story = 'A short story\nBy John Smith\n\nIt began like this. '
-            text = story_server.expand_story(story)
+            text = story_server.expand_story(story, min_length=50)
             story += text
             print(text)
 
@@ -158,8 +158,9 @@ def storyteller(
                 story += ' ' + user_sentence
                 text = story_server.expand_story(
                     story,
-                    sorted(target_token for team in teams for target_token in team.unseen_tokens()),
-                    1.5,
+                    target_tokens=sorted(target_token for team in teams for target_token in team.unseen_tokens()),
+                    bias=1.5,
+                    min_length=20,
                 )
                 story += text
                 print(text)
@@ -295,18 +296,19 @@ class StoryServer:
     def encode_word(self, word):
         encoded = self.enc.encode(' ' + word.lstrip())
         if len(encoded) != 1:
-            raise ValueError('Target word not in vocab')
+            raise ValueError('Word not in vocab')
         return encoded[0]
 
     def decode_token(self, token):
         decoded = self.enc.decode([token])
         return decoded.strip()
 
-    def expand_story(self, story, target_tokens=[], bias=1.0):
+    def expand_story(self, story, target_tokens=[], bias=1.0, min_length=0):
         run_options = tf.compat.v1.RunOptions(timeout_in_ms=30_000)
         expansion = ''
+        length = 0
 
-        for _ in range(1):  # TODO: Figure out a way of stopping huge run on sentences, then increase this
+        for _ in range(5):
             context_tokens = self.enc.encode(story + expansion)
             out = self.sess.run(self.output, options=run_options, feed_dict={
                 self.context: [context_tokens],
@@ -314,11 +316,16 @@ class StoryServer:
                 self.target_bias: [bias] * len(target_tokens),
             })[:, len(context_tokens):]
 
+            length += len(out[0])
             text = self.enc.decode(out[0])
             expansion += text
 
             if any(expansion.endswith(end_string) for end_string in self.end_strings):
-                break
+                if length >= min_length:
+                    break
+                else:
+                    expansion += ' '
+
 
         return expansion
 
