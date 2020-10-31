@@ -10,6 +10,7 @@ import math
 import os
 import random
 import re
+import textwrap
 
 import fire
 import numpy as np
@@ -99,7 +100,7 @@ def storyteller(
             story = 'A short story\nBy John Smith\n\nIt began like this. '
             text = story_server.expand_story(story, min_length=50)
             story += text
-            print(text)
+            print_wrap(text)
 
             def get_contained_target_tokens(sentence: Text, team: Team):
                 tokens = []
@@ -163,7 +164,7 @@ def storyteller(
                     min_length=20,
                 )
                 story += text
-                print(text)
+                print_wrap(text)
 
                 for t, team in enumerate(teams):
                     contained_target_tokens = get_contained_target_tokens(text, team)
@@ -178,6 +179,11 @@ def storyteller(
             print("~~~ The End ~~~")
             for winner in winners:
                 print(f"Team {winner+1} wins!", [player.name for player in teams[winner].players])
+
+
+def print_wrap(text, max_width=80):
+    for line in textwrap.wrap(text, max_width):
+        print(line)
 
 
 @dataclasses.dataclass
