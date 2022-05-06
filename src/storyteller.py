@@ -21,6 +21,17 @@ import model
 import sample
 import encoder
 
+@dataclasses.dataclass
+class Theme:
+    name: Text
+    body: Text
+
+THEMES = [
+    Theme('A short story', 'A short story\nBy John Smith\n\nIt began like this. '),
+    Theme('A rap', 'Music Lyrics\nGenre: Hip hop, rap\n\nGangsta life\nBy Jay Z\n\n'),
+    Theme('A documentary', 'Documentary Transcripts\nCategory: Nature\n\nPlanet Earth\nNarrated by David Attenborough\n\nOur planet has so much wonder to offer, if one only looks. '),
+]
+
 def storyteller(
     model_name='1558M',
     seed=None,
@@ -97,7 +108,7 @@ def storyteller(
                     team.target_tokens.append(target_token)
 
             # Start the story
-            story = 'A short story\nBy John Smith\n\nIt began like this. '
+            story = THEMES[0].body
             text = story_server.expand_story(story, min_length=50)
             story += text
             print_wrap(text)
